@@ -1,0 +1,28 @@
+/* resources/css/print.css */
+
+@media print {
+    /* Sembunyikan semua elemen yang tidak ingin dicetak secara default */
+    .hide-on-print {
+        display: none !important;
+    }
+
+    /* Tampilkan elemen yang HANYA ingin ditampilkan saat mencetak */
+    .show-on-print {
+        display: block !important;
+    }
+
+    /* Atur ulang layout body untuk pengalaman cetak terbaik */
+    body {
+        margin: 0;
+        padding: 0;
+        background-color: white; /* Pastikan latar belakang putih */
+    }
+
+    /* Pastikan komponen cetak menggunakan seluruh lebar halaman */
+    .printable-area {
+        width: 100%;
+        position: absolute;
+        top: 0;
+        left: 0;
+    }
+}

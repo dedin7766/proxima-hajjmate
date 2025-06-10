@@ -1,0 +1,463 @@
+// src/pages/Dashboard.tsx
+
+ import AppLayout from '@/layouts/app-layout';
+ import { type BreadcrumbItem, Product, ProductInTransaction, HeldTransaction, Customer } from '@/types';
+ import { Head, router } from '@inertiajs/react';
+ import { useEffect, useRef, useState } from 'react';
+ import axios from 'axios';
+ import { BrowserMultiFormatReader } from '@zxing/library';
+ import { formatRupiah, parseRupiah, formatDisplayRupiah } from '@/lib/utils'; // Pastikan formatDisplayRupiah diimpor jika belum
+
+ // Import komponen
+ import ProductCarousel from '@/components/ProductCarousel';
+ import TransactionPanel from '@/components/pos/TransactionPanel';
+ import ActionsPanel from '@/components/pos/ActionsPanel';
+ import ScannerModal from '@/components/pos/ScannerModal';
+ import ResumeTransactionModal from '@/components/pos/ResumeTransactionModal';
+ import SearchTransactionModal from '@/components/pos/SearchTransactionModal';
+ import Swal from 'sweetalert2'; // Import SweetAlert2
+
+ declare global {
+     interface Window {
+         snap: any;
+     }
+ }
+
+ interface DashboardProps {
+     products: Product[];
+     customers: Customer[];
+     errors?: { [key: string]: string };
+ }
+
+ const LOCAL_STORAGE_KEY = 'posTransactionData';
+ const HELD_TRANSACTIONS_KEY = 'posHeldTransactions';
+
+ export default function Dashboard({ products, customers }: DashboardProps) {
+     const breadcrumbs: BreadcrumbItem[] = [{ title: 'Dashboard', href: '/dashboard' }];
+
+     // State Management Utama
+     const [items, setItems] = useState<ProductInTransaction[]>([]);
+     const [customerName, setCustomerName] = useState('');
+     const [selectedCustomerId, setSelectedCustomerId] = useState<number | null>(null);
+     const [taxRate, setTaxRate] = useState('0');
+     const [discount, setDiscount] = useState('0');
+     const [paymentAmount, setPaymentAmount] = useState('');
+     const [paymentAmountRaw, setPaymentAmountRaw] = useState(0);
+     const [isProcessing, setIsProcessing] = useState(false);
+     const [isScannerModalOpen, setScannerModalOpen] = useState(false);
+     const [isResumeModalOpen, setResumeModalOpen] = useState(false);
+     const [heldTransactions, setHeldTransactions] = useState<HeldTransaction[]>([]);
+     const codeReader = useRef<BrowserMultiFormatReader | null>(null);
+
+     // State untuk Fitur Pencarian Transaksi
+     const [isSearchModalOpen, setSearchModalOpen] = useState(false);
+     const [searchInput, setSearchInput] = useState('');
+     const [isSearching, setIsSearching] = useState(false);
+     const [foundTransaction, setFoundTransaction] = useState<any | null>(null);
+     const [searchError, setSearchError] = useState<string | null>(null);
+
+     // Effects
+     useEffect(() => {
+         try {
+             const savedData = localStorage.getItem(LOCAL_STORAGE_KEY);
+             if (savedData) {
+                 const { items, customerName, taxRate, discount, selectedCustomerId } = JSON.parse(savedData);
+                 setItems(items || []); setCustomerName(customerName || ''); setTaxRate(taxRate || '0'); setDiscount(discount || '0'); setSelectedCustomerId(selectedCustomerId || null);
+             }
+             const savedHeld = localStorage.getItem(HELD_TRANSACTIONS_KEY);
+             if (savedHeld) setHeldTransactions(JSON.parse(savedHeld));
+         } catch (error) { console.error("Gagal memuat data dari localStorage:", error); }
+         codeReader.current = new BrowserMultiFormatReader();
+     }, []);
+
+     useEffect(() => {
+         try {
+             const transactionData = { items, customerName, taxRate, discount, selectedCustomerId };
+             localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(transactionData));
+         } catch (error) { console.error("Gagal menyimpan data ke localStorage:", error); }
+     }, [items, customerName, taxRate, discount, selectedCustomerId]);
+
+     // Kalkulasi
+     const totalItemAndDiscount = items.reduce((acc, i) => {
+         acc.total += i.price * i.quantity; acc.itemDiscount += i.discount; acc.subtotal += i.subtotal; return acc;
+     }, { total: 0, itemDiscount: 0, subtotal: 0 });
+     const overallDiscountAmount = parseRupiah(discount);
+     const totalOverallDiscount = totalItemAndDiscount.itemDiscount + overallDiscountAmount;
+     const subtotalAfterDiscount = totalItemAndDiscount.subtotal - overallDiscountAmount;
+     const taxPercentage = Number(taxRate) || 0;
+     const tax = subtotalAfterDiscount * (taxPercentage / 100);
+     const grandTotal = subtotalAfterDiscount + tax;
+     const change = paymentAmountRaw - grandTotal;
+     const isPaymentSufficient = paymentAmountRaw >= grandTotal;
+
+     // ===================================
+     // === SEMUA FUNGSI HANDLER LENGKAP ===
+     // ===================================
+
+     const handleCancelTransaction = () => {
+         setItems([]); setDiscount('0'); setTaxRate('0'); setCustomerName('');
+         setSelectedCustomerId(null); setPaymentAmount(''); setPaymentAmountRaw(0);
+         localStorage.removeItem(LOCAL_STORAGE_KEY);
+     };
+
+     // handlePrint is now only for reprinting, not for new transactions
+     const handlePrint = (invoiceNumber: string) => {
+         const transactionId = invoiceNumber;
+         const transactionDate = new Date().toLocaleString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+         const receiptContent = `<html><head><title>Struk Pembelian</title><style>body { font-family: 'Consolas', monospace; font-size: 9.5pt; width: 58mm; padding: 2.5mm; color: #000; } .header { text-align: center; margin-bottom: 10px; } .header h3 { margin: 0; font-size: 15pt; } .header p { margin: 1px 0; font-size: 8.5pt; } .info div { display: flex; justify-content: space-between; line-height: 1.4; font-size: 9pt; } .items-table { width: 100%; border-collapse: collapse; margin: 10px 0; } .items-table td[colspan="4"] { padding-top: 4px; font-size: 9pt; } .items-table .item-qty { text-align: left; padding-left: 8px; font-size: 8.5pt; } .items-table .item-price, .items-table .item-subtotal { text-align: right; font-size: 8.5pt; } .separator { border-top: 1px dashed #000; margin: 5px 0; } .totals div { display: flex; justify-content: space-between; margin-bottom: 3px; font-size: 9pt; } .totals .grand-total { margin-top: 5px; padding-top: 5px; font-weight: bold; font-size: 10pt; } .footer { text-align: center; margin-top: 15px; font-size: 9pt; }</style></head><body><div class="header"><h3>Angkasa Tour</h3><p>xxxxxxxx No. 123</p><p>Telepon: 0812-3456-7890</p></div><div class="info"><div><span>No:</span> <span>${transactionId}</span></div><div><span>Tanggal:</span> <span>${transactionDate}</span></div><div><span>Admin:</span> <span>Elizabeth</span></div>${customerName ? `<div><span>Pelanggan:</span> <span>${customerName}</span></div>` : ''}</div><div class="separator"></div><table class="items-table">${items.map(item => `<tr><td colspan="4">${item.name}</td></tr><tr><td></td><td class="item-qty">${item.quantity} x</td><td class="item-price">${item.price.toLocaleString('id-ID')}</td><td class="item-subtotal">${(item.price * item.quantity).toLocaleString('id-ID')}</td></tr>${item.discount > 0 ? `<tr><td></td><td colspan="2" style="font-size: 8pt; padding-left: 10px;">Diskon</td><td class="item-subtotal" style="font-size: 8pt;">- ${item.discount.toLocaleString('id-ID')}</td></tr>` : ''}`).join('')}</table><div class="separator"></div><div class="totals"><div><span>Subtotal:</span> <span>Rp ${totalItemAndDiscount.total.toLocaleString('id-ID')}</span></div>${totalOverallDiscount > 0 ? `<div><span>Total Diskon:</span> <span>- Rp ${totalOverallDiscount.toLocaleString('id-ID')}</span></div>` : ''}<div><span>Pajak (PPN):</span> <span>Rp ${tax.toLocaleString('id-ID', { maximumFractionDigits: 0 })}</span></div><div class="separator"></div><div class="grand-total"><span>TOTAL:</span> <span>Rp ${grandTotal.toLocaleString('id-ID')}</span></div><div class="separator"></div><div><span>Tunai:</span> <span>Rp ${paymentAmountRaw.toLocaleString('id-ID')}</span></div><div><span>Kembali:</span> <span>Rp ${(change > 0 ? change : 0).toLocaleString('id-ID')}</span></div></div><div class="footer"><p>Terima kasih!</p></div></body></html>`;
+         const printWindow = window.open('', '', 'height=500,width=500');
+         if (printWindow) { printWindow.document.write(receiptContent); printWindow.document.close(); printWindow.focus(); printWindow.print(); printWindow.close(); }
+     };
+
+     const addProductToTransaction = (product: Product) => {
+         setItems(prev => {
+             const exist = prev.find(i => i.product_id === product.id);
+             const price = Number(product.price);
+             if (exist) { return prev.map(i => i.product_id === product.id ? { ...i, quantity: i.quantity + 1, subtotal: (i.quantity + 1) * price - i.discount } : i); }
+             return [...prev, { product_id: product.id, name: product.name, quantity: 1, price, discount: 0, subtotal: price }];
+         });
+     };
+
+     const handleScan = (barcode: string) => {
+         const product = products.find(p => String(p.sku) === barcode);
+         if (product) addProductToTransaction(product);
+         else alert('Produk tidak ditemukan!');
+         setScannerModalOpen(false);
+     };
+
+     const handleHoldTransaction = () => {
+         if (items.length === 0) return;
+         const newHeld: HeldTransaction = { id: Date.now(), name: customerName || `Transaksi #${Date.now().toString().slice(-5)}`, heldAt: new Date().toLocaleString('id-ID'), itemCount: items.length, data: { items, customerName, taxRate, discount, selectedCustomerId } };
+         const updatedHeld = [...heldTransactions, newHeld];
+         setHeldTransactions(updatedHeld);
+         localStorage.setItem(HELD_TRANSACTIONS_KEY, JSON.stringify(updatedHeld));
+         Swal.fire({
+            icon: 'success',
+            title: 'Transaksi Ditahan!',
+            text: `Transaksi untuk "${newHeld.name}" berhasil ditahan.`,
+            confirmButtonText: 'OK'
+         });
+         handleCancelTransaction();
+     };
+
+     const handleResumeTransaction = (id: number) => {
+         const toResume = heldTransactions.find(t => t.id === id);
+         if (!toResume) return;
+         setItems(toResume.data.items); setCustomerName(toResume.data.customerName); setTaxRate(toResume.data.taxRate); setDiscount(toResume.data.discount); setSelectedCustomerId(toResume.data.selectedCustomerId);
+         handleDeleteHeldTransaction(id, false);
+         setResumeModalOpen(false);
+     };
+
+     const handleDeleteHeldTransaction = (id: number, showAlert = true) => {
+         const updatedHeld = heldTransactions.filter(t => t.id !== id);
+         setHeldTransactions(updatedHeld);
+         localStorage.setItem(HELD_TRANSACTIONS_KEY, JSON.stringify(updatedHeld));
+         if (showAlert) {
+            Swal.fire({
+                icon: 'info',
+                title: 'Dihapus!',
+                text: 'Transaksi yang ditahan berhasil dihapus.',
+                confirmButtonText: 'OK'
+            });
+         }
+     };
+
+     const handleCashPayment = () => {
+         if (items.length === 0 || !isPaymentSufficient) {
+             Swal.fire({
+                icon: 'warning',
+                title: 'Gagal!',
+                text: items.length === 0 ? "Keranjang kosong! Silakan tambahkan produk terlebih dahulu." : "Jumlah bayar kurang! Mohon masukkan jumlah yang mencukupi.",
+                confirmButtonText: 'OK'
+             });
+             return;
+         }
+         const transactionData = { items, grandTotal, paymentAmount: paymentAmountRaw, change: change > 0 ? change : 0, customerName, customer_id: selectedCustomerId };
+         router.post(route('transactions.store.cash'), transactionData, {
+             onStart: () => setIsProcessing(true),
+             onSuccess: (page) => {
+                 const newTransaction = page.props.transaction;
+                 // As per your request, if the transaction is successfully saved (onSuccess is triggered),
+                 // we assume it's a success regardless of whether invoice_number is immediately available for printing.
+                 // The 'invoice_number' check is now only for displaying it in the success message.
+                 const invoiceMsg = newTransaction?.invoice_number ? ` dengan nomor invoice ${newTransaction.invoice_number}.` : '.';
+                 Swal.fire({
+                    icon: 'success',
+                    title: 'Pembayaran Tunai Berhasil!',
+                    text: `Transaksi berhasil disimpan${invoiceMsg}`,
+                    confirmButtonText: 'OK'
+                 });
+                 handleCancelTransaction();
+             },
+             onError: (errors) => {
+                 Swal.fire({
+                    icon: 'error',
+                    title: 'Gagal!',
+                    text: `Terjadi kesalahan saat memproses pembayaran: ${Object.values(errors)[0]}`,
+                    confirmButtonText: 'OK'
+                 });
+             },
+             onFinish: () => setIsProcessing(false),
+         });
+     };
+
+     const handleMidtransPayment = async () => {
+         if (items.length === 0) {
+            Swal.fire({
+                icon: 'warning',
+                title: 'Keranjang Kosong!',
+                text: 'Silakan tambahkan produk ke keranjang sebelum melanjutkan pembayaran Midtrans.',
+                confirmButtonText: 'OK'
+            });
+            return;
+         }
+         setIsProcessing(true);
+         try {
+             const response = await axios.post(route('transactions.store.midtrans'), { items, grandTotal, customerName, customer_id: selectedCustomerId });
+             if (response.data.snap_token) {
+                 window.snap.pay(response.data.snap_token, {
+                     onSuccess: () => {
+                        Swal.fire({
+                           icon: 'success',
+                           title: 'Pembayaran Midtrans Sukses!',
+                           text: 'Pembayaran Anda telah berhasil diproses.',
+                           confirmButtonText: 'OK'
+                        });
+                        handleCancelTransaction();
+                     },
+                     onPending: () => {
+                        Swal.fire({
+                           icon: 'info',
+                           title: 'Menunggu Pembayaran...',
+                           text: 'Pembayaran Anda sedang menunggu konfirmasi. Silakan cek status di Midtrans.',
+                           confirmButtonText: 'OK'
+                        });
+                        handleCancelTransaction();
+                     },
+                     onError: (error: any) => { // Midtrans onError can pass an error object
+                        Swal.fire({
+                           icon: 'error',
+                           title: 'Pembayaran Gagal!',
+                           text: 'Terjadi kesalahan saat memproses pembayaran Midtrans. Silakan coba lagi.',
+                           confirmButtonText: 'OK'
+                        });
+                     },
+                     onClose: () => { // User closed the Midtrans popup
+                        Swal.fire({
+                            icon: 'info',
+                            title: 'Pembayaran Dibatalkan',
+                            text: 'Anda menutup jendela pembayaran Midtrans. Silakan coba lagi jika ingin melanjutkan.',
+                            confirmButtonText: 'OK'
+                        });
+                     }
+                 });
+             } else {
+                 Swal.fire({
+                    icon: 'error',
+                    title: 'Kesalahan Server!',
+                    text: 'Token pembayaran Midtrans tidak diterima dari server.',
+                    confirmButtonText: 'OK'
+                 });
+             }
+         } catch (error: any) {
+             Swal.fire({
+                icon: 'error',
+                title: 'Kesalahan Jaringan!',
+                text: error.response?.data?.message || 'Terjadi kesalahan pada server saat memproses pembayaran Midtrans.',
+                confirmButtonText: 'OK'
+             });
+         }
+         finally { setIsProcessing(false); }
+     };
+
+     const handleOpenSearchModal = () => {
+         setSearchModalOpen(true); setSearchInput(''); setFoundTransaction(null); setSearchError(null);
+     };
+
+     const handleSearchTransaction = async () => {
+         if (!searchInput) return;
+         setIsSearching(true); setSearchError(null); setFoundTransaction(null);
+         try {
+             const response = await axios.get(route('transactions.find', { invoice: searchInput }));
+             if (response.data.success) setFoundTransaction(response.data.transaction);
+         } catch (error: any) {
+             setSearchError(error.response?.data?.message || 'Terjadi kesalahan pada server.');
+         } finally {
+             setIsSearching(false);
+         }
+     };
+
+     const handleReprint = (transaction: any) => {
+         // Format the transaction date and time for display
+         const transactionDate = new Date(transaction.created_at).toLocaleString('id-ID', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+         // Calculate total original amount of items before discounts
+         // Ensure price_at_transaction and quantity are parsed as floats
+         const totalItemOriginal = transaction.details.reduce((acc: number, item: any) => acc + (parseFloat(item.price_at_transaction) * parseFloat(item.quantity)), 0);
+
+         // Calculate the total discount applied across all items
+         // Ensure item.discount is parsed as a float
+         const totalItemDiscount = transaction.details.reduce((acc: number, item: any) => acc + (parseFloat(item.discount || '0')), 0);
+
+         // Helper function for consistent number formatting (Indonesian locale)
+         // Ensures numbers are formatted without unnecessary trailing zeros for whole numbers
+         const formatNumber = (num: number) => {
+             return num.toLocaleString('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+         };
+
+         // Construct the HTML content for the receipt
+         const receiptContent = `
+             <html>
+             <head>
+                 <title>Struk Pembelian</title>
+                 <style>
+                     body {
+                         font-family: 'Consolas', monospace;
+                         font-size: 9.5pt;
+                         width: 58mm;
+                         padding: 2.5mm;
+                         color: #000;
+                     }
+                     .header {
+                         text-align: center;
+                         margin-bottom: 10px;
+                     }
+                     .header h3 {
+                         margin: 0;
+                         font-size: 15pt;
+                     }
+                     .header p {
+                         margin: 1px 0;
+                         font-size: 8.5pt;
+                     }
+                     .info div {
+                         display: flex;
+                         justify-content: space-between;
+                         line-height: 1.4;
+                         font-size: 9pt;
+                     }
+                     .items-table {
+                         width: 100%;
+                         border-collapse: collapse;
+                         margin: 10px 0;
+                     }
+                     .items-table td[colspan="4"] {
+                         padding-top: 4px;
+                         font-size: 9pt;
+                     }
+                     .items-table .item-qty {
+                         text-align: left;
+                         padding-left: 8px;
+                         font-size: 8.5pt;
+                     }
+                     .items-table .item-price,
+                     .items-table .item-subtotal {
+                         text-align: right;
+                         font-size: 8.5pt;
+                     }
+                     .separator {
+                         border-top: 1px dashed #000;
+                         margin: 5px 0;
+                     }
+                     .totals div {
+                         display: flex;
+                         justify-content: space-between;
+                         margin-bottom: 3px;
+                         font-size: 9pt;
+                     }
+                     .totals .grand-total {
+                         margin-top: 5px;
+                         padding-top: 5px;
+                         font-weight: bold;
+                         font-size: 10pt;
+                     }
+                     .footer {
+                         text-align: center;
+                         margin-top: 15px;
+                         font-size: 9pt;
+                     }
+                 </style>
+             </head>
+             <body>
+                 <div class="header">
+                     <h3>Angkasa Tour</h3>
+                     <p>xxxxxxxx No. 123</p>
+                     <p>Telepon: 0812-3456-7890</p>
+                 </div>
+                 <div class="info">
+                     <div><span>No:</span> <span>${transaction.invoice_number}</span></div>
+                     <div><span>Tanggal:</span> <span>${transactionDate}</span></div>
+                     <div><span>Admin:</span> <span>Elizabeth</span></div>
+                     ${transaction.customer_name ? `<div><span>Pelanggan:</span> <span>${transaction.customer_name}</span></div>` : ''}
+                 </div>
+                 <div class="separator"></div>
+                 <table class="items-table">
+                     ${transaction.details.map((item: any) => `
+                         <tr>
+                             <td colspan="4">${item.product.name}</td>
+                         </tr>
+                         <tr>
+                             <td></td>
+                             <td class="item-qty">${item.quantity} x</td>
+                             <td class="item-price">${formatNumber(parseFloat(item.price_at_transaction))}</td>
+                             <td class="item-subtotal">${formatNumber(parseFloat(item.price_at_transaction) * parseFloat(item.quantity))}</td>
+                         </tr>
+                         ${parseFloat(item.discount) > 0 ? `
+                             <tr>
+                                 <td></td>
+                                 <td colspan="2" style="font-size: 8pt; padding-left: 10px;">Diskon</td>
+                                 <td class="item-subtotal" style="font-size: 8pt;">- ${formatNumber(parseFloat(item.discount))}</td>
+                             </tr>` : ''
+                         }`).join('')}
+                 </table>
+                 <div class="separator"></div>
+                 <div class="totals">
+                     <div><span>Subtotal:</span> <span>Rp ${formatNumber(totalItemOriginal)}</span></div>
+                     ${totalItemDiscount > 0 ? `<div><span>Total Diskon:</span> <span>- Rp ${formatNumber(totalItemDiscount)}</span></div>` : ''}
+                     <div><span>Pajak (PPN):</span> <span>Rp ${formatNumber(parseFloat(transaction.tax_amount))}</span></div>
+                     <div class="separator"></div>
+                     <div class="grand-total"><span>TOTAL:</span> <span>Rp ${formatNumber(parseFloat(transaction.total_amount))}</span></div>
+                     <div class="separator"></div>
+                     <div><span>Tunai:</span> <span>Rp ${formatNumber(parseFloat(transaction.amount_paid))}</span></div>
+                     <div><span>Kembali:</span> <span>Rp ${formatNumber(parseFloat(transaction.change))}</span></div>
+                 </div>
+                 <div class="footer">
+                     <p>Terima kasih!</p>
+                 </div>
+             </body>
+             </html>
+         `;
+
+         // Open a new window, write the receipt content, and print it
+         const printWindow = window.open('', '', 'height=500,width=500');
+         if (printWindow) {
+             printWindow.document.write(receiptContent);
+             printWindow.document.close();
+             printWindow.focus();
+             printWindow.print();
+             printWindow.close();
+         }
+     };
+
+
+     return (
+         <AppLayout breadcrumbs={breadcrumbs}>
+             <Head title="Dashboard" />
+
+             <ScannerModal isOpen={isScannerModalOpen} onClose={() => setScannerModalOpen(false)} onScan={handleScan} codeReader={codeReader.current} />
+             <ResumeTransactionModal isOpen={isResumeModalOpen} onClose={() => setResumeModalOpen(false)} transactions={heldTransactions} onResume={handleResumeTransaction} onDelete={handleDeleteHeldTransaction} />
+             <SearchTransactionModal isOpen={isSearchModalOpen} onClose={() => setSearchModalOpen(false)} searchInput={searchInput} setSearchInput={setSearchInput} onSearch={handleSearchTransaction} isSearching={isSearching} searchError={searchError} foundTransaction={foundTransaction} onReprint={handleReprint} />
+
+             <div className="flex h-full flex-1 flex-col gap-4 p-7">
+                 <div className="mb-1">
+                     {products?.length > 0 && <h2 className="text-xl font-semibold mb-4 text-foreground">Mau kemana?</h2>}
+                     <ProductCarousel products={products} onProductClick={addProductToTransaction} />
+                 </div>
+                 <div className="flex flex-col lg:flex-row flex-1 gap-6 min-h-[700px]">
+                     <TransactionPanel items={items} setItems={setItems} products={products} customers={customers} customerName={customerName} setCustomerName={setCustomerName} setSelectedCustomerId={setSelectedCustomerId} taxRate={taxRate} setTaxRate={setTaxRate} discount={discount} setDiscount={setDiscount} addProductToTransaction={addProductToTransaction} total={totalItemAndDiscount.subtotal} totalOverallDiscount={totalOverallDiscount} tax={tax} grandTotal={grandTotal} />
+                     <ActionsPanel items={items} isProcessing={isProcessing} isPaymentSufficient={isPaymentSufficient} grandTotal={grandTotal} change={change} paymentAmount={paymentAmount} heldTransactionsCount={heldTransactions.length} setPaymentAmount={setPaymentAmount} setPaymentAmountRaw={setPaymentAmountRaw} onScanClick={() => setScannerModalOpen(true)} onSearchClick={handleOpenSearchModal} onResumeClick={() => setResumeModalOpen(true)} onCashPayment={handleCashPayment} onMidtransPayment={handleMidtransPayment} onHold={handleHoldTransaction} onCancel={handleCancelTransaction} />
+                 </div>
+             </div>
+         </AppLayout>
+     );
+ }
